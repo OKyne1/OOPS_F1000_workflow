@@ -1,0 +1,1 @@
+Mouse proteome (230308) was extracted from uniprot (https://www.uniprot.org/proteomes/UP000000589)

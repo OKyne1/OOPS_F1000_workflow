@@ -1,0 +1,1696 @@
+---
+title: "Test"
+author: "Oakem Kyne"
+date: "`r Sys.Date()`"
+output: html_document
+---
+Note: this is currently not in a HTML format as some of the processing steps cannot be written to these documents. This is currently being changed but requires the updating of certain packages.
+
+
+Whilst a brief description of the processing steps is given with the code chunks these are to be more heavily commented in the final published workflow.
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+#setwd("../f1000_script_hoefig/notebooks")
+```
+
+**R version**: `R version 4.2.2 (2022-10-31)`
+
+**Bioconductor version**: `3.16`
+
+```{r fasta_directory}
+directory_hp <- "../fasta_files/230308_mouse_proteome.fasta"
+```
+
+# Introduction
+The importance of identifying RBPs has become increasingly apparent, leading to
+the development of high-throughput methods to investigate their presence and
+behaviour. One such method, orthogonal organic phase separation (OOPS), requires
+significantly less starting material than XRNAX and PTex, and can identify RNAs
+without a poly(A) tail, unlike methods relying in the annealing of the mRNA
+poly(A) tail to poly(dT) sequences. As a result, OOPS is a powerful and valuable
+tool for researchers in this field. To make this method more accessible, this
+paper outlines the data processing steps used to analyse the data obtained
+from OOPS experiments.
+
+The OOPS method leverages crosslinked protein-RNA complexes intrinsic
+properties. Proteins are separated into the organic phase, while RNAs are drawn
+to the aqueous phase. However due to their dual nature protein-RNA complexes
+form an interface between the two phases. Through repeated rounds of phase
+separation, RBPs are enriched at this interface which and extracted for
+analysis with MS. Here we show an approach for OOPS data analysis and consider
+how the analysis must be adapted to accommodate variations in the methodology.
+The main ways the OOPS method is varied is by using either the interface or
+organic phase for RBP extraction, additional RNase positive controls and using
+stable isotope labelling by amino acids (SILAC) in the investigations.
+
+Our data analysis workflow depends on the R package, ‘QFeatures’ which enables
+efficient data import, processing and analysis. These traits enable improved
+data management and traceability. To demonstrate the variations in OOPS
+methodologies we use the published datasets from Queiroz et al. (2019) and
+Hoefig et al. (2021).
+
+
+## Package Installation and loading
+
+This workflow is written in the programming language R, due to its power as a language for statistical analysis. Within this language the opensource software from [Bioconductor]( https://bioconductor.org/) is used due to its strength in analysing biological datasets. The accompanying code gives instructions for the installation of Bioconductor and it’s packages we use within this protocol.
+```{r Bioconductor_installation, results=FALSE}
+# if (!require("BiocManager", quietly = TRUE))
+#     install.packages("BiocManager")
+# 
+# BiocManager::install(c("QFeatures", "tidyverse",
+#                        "ggplot2", "NormalyzerDE", "corrplot", "factoextra",
+#                        "limma", "Biostrings", "plyr", "org.Hs.eg.db",
+#                        "AnnotationDbi", "enrichplot",
+#                        "ReactomePA", "GO.db", "goseq", "DESeq2"))
+# #Edit this to make it relevant to this workflow consider the mouse part as well
+```
+Loading of the required packages utilizes the ‘library()’ function, shown below.
+```{r loading_packages}
+suppressPackageStartupMessages({
+  library("QFeatures")
+  library("tidyverse")
+  library("ggplot2")
+  library("corrplot")
+  library("factoextra")
+  library("limma")
+  library("Biostrings")
+  library("plyr")
+  library("org.Mm.eg.db") 
+  ## If working with a different species will have to change this from mouse
+  library("AnnotationDbi")
+  library("clusterProfiler")
+  library("enrichplot")
+  library("ReactomePA")
+  library("ggpubr")
+  library("GO.db")
+  })
+```
+
+
+## The Infrastructure
+
+Data is managed in this workflow using the 'SummarizedExperiment' class and
+‘QFeatures’ objects. The matix-like format of ‘SummarizedExperiments’ can
+contain multiple assays in an accessible and comprehensive format. These
+'SummarizedExperiments' are then aggregated to a ‘QFeatures’ object which
+contains multiple ‘SummarizedExperiments’. This object preserves links between
+the different ‘SummarizedExperiments’ it contains, for example connections
+between peptide and protein level data.
+
+
+```{r SE_diagram, echo=FALSE, out.width='80%'}
+knitr::include_graphics("../data/SummarizedExperiment_diagram.png")
+```
+
+
+## Data Import 
+Data is first imported from the CSV file produced by PD2.5, from this the
+quantitative columns are identified. PD typically names them:
+“Abundance.FX.Sample” where X is the sample number.
+
+```{r data_import, warning = FALSE, message = FALSE, cache = TRUE}
+## Locate and load the PeptideGroups.txt file
+directory <- "../data/Mouse_OOPS_Hoefig_PeptideGroups.txt"
+
+## Determine the quantitative columns
+names(read.delim(directory))
+```
+The identified quantitative columns are then used to create a
+‘SummarizedExperiment’, as shown in the code below. In this case it is column 22
+to 27 are the quantitative columns.
+
+```{r data_import_2, cache = TRUE}
+## creation of a peptide level 'SummarizedExperiment'
+hoefig_se <- readSummarizedExperiment(directory,
+                                    ecol = 22:27,
+                                    sep = "\t")
+```
+
+
+## Adding Meta Data
+The addition of meta data aids later subsetting. Here we add information on the sample, the condition and the replicate.
+
+```{r housekeeping, warning = FALSE, message = FALSE, cache = TRUE}
+## Check sample names
+colnames(hoefig_se)
+
+## Renaming samples in the SE columns
+colnames(hoefig_se) <- c("S1", "S2", "S3", "S4", "S5", 
+                       "S6")
+
+## Annotate the sample metadata
+hoefig_se$sample <- c("S1", "S2", "S3", "S4", "S5", 
+                   "S6")
+
+hoefig_se$condition <- c("CL", "CL", "CL", "NC", "NC", "NC")
+
+hoefig_se$replicate <- c("rep1", "rep2", "rep3", "rep1", "rep2", "rep3")
+
+## Verify columns have been renamed
+colData(hoefig_se)
+```
+
+
+```{r lfq_exploration, cache = TRUE}
+## Checking the peptide level features imported
+names(rowData(hoefig_se))
+```
+This shows all the row names present in our 'SummarizedExperiment'.
+
+
+```{r lfq_exploration_2, cache = TRUE}
+## Check the total number of entries and the number of columns
+dim(hoefig_se)
+```
+This shows the dimensions of the 'SummarizedExperiment', in this case there are
+42040 rows and 6 columns.
+
+```{r lfq_exploration_3, cache = TRUE}
+## Number of PSMs
+message(paste0(sum(rowData(hoefig_se)$Number.of.PSMs), 
+               " PSMs"))
+
+## Number of peptides
+peptides <- unique(rowData(hoefig_se)$Sequence)
+message(paste0(length(peptides), 
+               " peptides"))
+
+## Number of master proteins
+proteins <- unique(rowData(hoefig_se)$Master.Protein.Accessions)
+message(paste0(length(proteins), 
+               " proteins"))
+```
+This tells us how many PSMs, peptides and proteins are present in our data prior
+to filterning.
+
+# Data Cleaning
+Data cleaning for these experiments follows the basic outline given in Charl et
+al. 2023 and are shown below. Stages of peptide level data cleaning:
+
+1.	Removal of peptides lacking a master protein accession
+
+2.	Removal of contaminant peptides
+
+3.	Removal of non-quantitative peptides
+
+4.	Removal of peptides quantified from non-monoisotopic peaks (Not performed in
+SILAC experiments)
+
+5.	Removal of non-unique peptides
+
+6.  Removal of peptides not assigned rank 1
+
+## 1. Removal of Peptides Lacking a Master Protein Accession
+These peptides have not been matched to a protein in the fasta files uploaded to
+PD and are removed from our analysis
+```{r lfq_remove_unknown, cache = TRUE}
+## Find out how many peptides we expect to lose
+length(which(rowData(hoefig_se)$Master.Protein.Accessions == ""))
+
+## Store row indices of peptides without a master protein accession
+no_protein_accession <- which(rowData(hoefig_se)$Master.Protein.Accessions == "")
+
+
+```
+This shows the number of duplicated proteins, if this value is 0 do not run the next code chunk.
+
+```{r}
+## Drop these rows from our data
+hoefig_se <- hoefig_se[-no_protein_accession, ]
+message(paste0("Removing ", length(no_protein_accession),
+               " peptides lacking a master protein accession"))
+```
+Peptides which have been detected but lack a master protein accession are
+removed from the dataset and are not considered for analysis. 
+
+## 2. Removal of Contaminant Peptides
+The paper frankenfield et al. 2022 identifies proteins commonly contaminating
+proteomics samples. Peptides found in these proteins are removed from the
+analysis to avoid their erroneous use in peptide quantification. To this file we
+also add RNase A/T1, used in sample preparation (trypsin is already present).
+
+```{r loading_cont_fasta, cache=TRUE}
+# Load the contaminant fasta file
+contaminant_fasta_directory <- "../fasta_files/common_contaminants_OOPS.fasta"
+cont_fasta <- Biostrings::fasta.index(contaminant_fasta_directory, seqtype = "AA")
+
+# create a base R version of stringr::str_extract_all()
+str_extract_all <- function(pattern, string){
+  gregexpr(pattern, string, perl = TRUE) %>%
+    regmatches(string, .) %>%
+    unlist()
+}
+
+# Extract protein accessions - this drops the cont_ at the start
+cont_prot_accessions <- cont_fasta %>%
+  pull(desc)%>%
+  str_extract_all("(?<=\\_).*?(?=\\|)",.)%>%
+  unlist()
+```
+
+```{r removing_cont_peptides, cache=TRUE}
+find_cont <- function(se, cont_prot_accessions){
+  
+  cont_indices <- c()
+  for(i in 1:length(cont_prot_accessions)){
+    
+    cont_protein <- cont_prot_accessions[i]
+    cont_present <- grep(cont_protein, rowData(se)$Protein.Accessions)
+    
+    output <- c(cont_present)
+    cont_indices <- append(cont_indices, output)
+  }
+  cont_peptide_indicies <- cont_indices
+}
+
+cont_peptides <- find_cont(hoefig_se, cont_prot_accessions)
+
+hoefig_se <- hoefig_se[-cont_peptides, ]
+message(paste("Removing", length(unique(cont_peptides)), "peptides corresponding to contaminant proteins found in the samples", sep = " "))
+```
+It is important to choose the right column for this.
+
+
+## 3. Removal of Peptides Lacking Quantitative Information
+We have low confidence in peptides lacking quantitative information so filter
+them from the analysis.
+```{r lfq_remove_no_quant, cache = TRUE}
+## Number of peptides with non-quantitative values
+length(which(rowData(hoefig_se)$Quan.Info == "NoQuanValues"))
+
+## Store row indices of peptides with no quantitative values
+no_quant_peptides <- which(rowData(hoefig_se)$Quan.Info == "NoQuanValues")
+
+## Remove these rows from our data 
+hoefig_se <- hoefig_se[-no_quant_peptides, ]
+message(paste0("Removing ", length(no_quant_peptides), " peptides lacking quantitative information"))
+```
+
+## 4. Removal of Peptides Quantified from Non-Monoisotopic Peaks (LFQ only)
+In our analysis the monoisotopic mass is used for LFQ, as a method to enable
+differentiation between similarly weighted peptides. Thus, peptides identified
+through non-monoisotopic peaks are not considered in our analysis. For
+investigations using SILAC this step should not be included.
+
+```{r lfq_not_monoisotopic, cache = TRUE}
+## Determine the number of peptides identified by non-monoisotopic peaks
+length(which(rowData(hoefig_se)$Quan.Info == "NoneMonoisotopic"))
+
+## Store row indices of peptides not identified by a monoisotopic peak
+not_mono_peptides <- which(rowData(hoefig_se)$Quan.Info == "NoneMonoisotopic")
+
+## Remove these rows from our data
+hoefig_se <- hoefig_se[-not_mono_peptides, ]
+message(paste0("Removing ", length(not_mono_peptides), " peptides derived from non monoisotopic peaks"))
+```
+
+## 5. Removal of Non-Unique Peptides
+In our analysis peptides corresponding to only a single protein are used for
+quantification, consequently peptides belonging to different proteins of the
+same group or different protein groups are removed. It is important to check how
+PD defines a unique peptide, this can either be peptides found only in a single
+protein or peptides only found within a single peptide group.
+
+```{r lfw_quan_info, cache = TRUE}
+## Check for remaining annotations
+table(rowData(hoefig_se)$Quan.Info)
+```
+This shows the number of peptides unique to a protein or protein group. It is
+important to check on PD what this relates to in your data.
+```{r lfq_remove_shared, cache = TRUE}
+## Find out how many peptides we expect to lose
+length(which(rowData(hoefig_se)$Number.of.Proteins != 1))
+
+## Store row indices of peptides which are not unique
+not_unique_peptides <- which(rowData(hoefig_se)$Number.of.Proteins != 1)
+
+## Remove these rows from our data
+hoefig_se <- hoefig_se[-not_unique_peptides, ]
+message(paste0("Removing ", length(not_unique_peptides), 
+               " peptides which are not unique to a single protein"))
+```
+Peptides which are not unique to a single protein are removed from the SE.
+
+## 6. Removal of peptides not assigned rank 1
+The peptide rank represents the confidence the PSM matches a given peptide,
+higher ranked peptides are less likely to be correctly identified from the PSM.
+For simplicity of quantification here we remove peptides not assigned rank 1.
+```{r lfq_rank, cache = TRUE}
+## Find out how many peptides we expect to lose
+summary(rowData(hoefig_se)$Rank.by.Search.Engine.Sequest.HT != 1)
+
+## Store row indices of peptides that are not rank 1 according to SequestHT
+not_rank1_engine_peptides <-
+  which(rowData(hoefig_se)$Rank.by.Search.Engine.Sequest.HT != 1)
+
+## Remove these rows from our data
+hoefig_se <- hoefig_se[-not_rank1_engine_peptides, ]
+message(paste0("Removed ", length(not_rank1_engine_peptides),
+               " peptides not allocated as rank 1 by Proteome Discoverer"))
+```
+
+## Exploration of peptide data
+Next, we take a look at the cleaned peptide-level data to check the quality and
+behavior of our data. To investigate the distribution of the intensities, first
+we must calculate them for the CL and NC samples. This is shown in the code
+below and a summary is published in the table.
+
+
+```{r oops_summarize_peptide_data, cache = TRUE}
+cl <- c("S1", "S2", "S3")
+nc <- c("S4", "S5", "S6")
+
+peptide_summary <- assay(hoefig_se) %>%
+                   longFormat() %>%
+                   mutate(condition = ifelse(colname %in% cl, "cl",
+                                             "nc")) %>%
+                   group_by(condition) %>%
+                   summarise(sum_intensity = sum(value, na.rm = TRUE),
+                   max_intensity = max(value, na.rm = TRUE),
+                   median_intensity = median(value, na.rm = TRUE),
+                   length_intensity = sum(is.finite(value)))
+
+print(peptide_summary)
+```
+
+### Sum Peptide Intensity
+```{r oops_check_behaviour_sum, cache = TRUE}
+# investigating the sum intensity
+library(ggplot2)
+peptide_summary %>% 
+              ggplot(aes(x = condition, y = sum_intensity, fill = condition, group = condition)) +
+                geom_bar(stat = 'identity', position = 'dodge') +
+                # scale_fill_manual(values = c('#a13838', '#3e6990'))+
+                # geom_bar(stat="identity", color="black")+
+                # scale_y_continuous(limits = c(0, NA), expand = c(0, 0))+
+                # scale_x_discrete(limits = c("cl", "nc"),
+                     # labels = c("CL", "NC"),
+                     # expand = c(0, .5)) +
+              labs(x = "Condition", y = "Sum Intensity")+
+              theme_classic()
+```
+The sum peptide intensity is expected to be higher in the CL sample compared to
+the NC sample due to the higher abundance of RBPs.
+
+### Maximum Peptide Intensity
+```{R oops_check_behaviour_max, cache = TRUE}
+# investigating the maximum intensity
+peptide_summary %>% 
+              ggplot(aes(x = condition, y = max_intensity, fill = condition, group = condition)) +
+              geom_bar(stat = 'identity', position = 'dodge') +
+              scale_fill_manual(values = c('#a13838', '#3e6990'))+
+              geom_bar(stat="identity", color="black")+
+              scale_y_continuous(limits = c(0, NA), expand = c(0, 0))+
+              scale_x_discrete(limits = c("cl", "nc"),
+                     labels = c("CL", "NC"),
+                     expand = c(0, .5)) +
+               labs(x = "", y = "Maximum Intensity") +
+              theme_classic() 
+```
+
+The maximum intensities are unlikely to vary much between samples as these are
+often due to glycoprotiens when working with interface samples and so are likely
+to be similar. When working with organic phase samples (as in this case), it is
+more likely to be an RNA binding proteins. In this experiment the maximum
+intensity for CL corresponds with the 60S ribosomal protein L5, and for the NC
+protein it corresponds with Nucleolin. When working with the organic phase we
+might expect the CL to be higher than the NC and this could indicate poor
+separation.
+
+
+### Median Peptide Intensity
+```{R oops_check_behaviour_median, cache = TRUE}
+# investigating the median intensity
+
+peptide_summary %>% 
+              ggplot(aes(x = condition, y = median_intensity, fill = condition, group = condition)) +
+              geom_bar(stat = 'identity', position = 'dodge') +
+              scale_fill_manual(values = c('#a13838', '#3e6990'))+
+              geom_bar(stat="identity", color="black")+
+              scale_y_continuous(limits = c(0, NA), expand = c(0, 0))+
+              scale_x_discrete(limits = c("cl", "nc"),
+                     labels = c("CL", "NC"),
+                     expand = c(0, .5)) +
+               labs(x = "", y = "Median Intensity") +
+              theme_classic() 
+```
+As with sum peptide intensity we expect higher median peptide intensity in the
+CL samples compared to the NC samples due to the presence of RBPs. This should
+be the case irrespective of whether the experiment is using the interface or the
+organic phase for RBP extraction.
+
+
+## Annotating Glycoproteins and GO-Defined RBPs
+```{r Glyco_annotation, cache=TRUE}
+# ## Upload fasta file containing mouse proteome (contains gene information too)
+# mouse_fasta <- Biostrings::fasta.index("../fasta_files/230308_mouse_proteome.fasta")
+# 
+# 
+# ## Extract the UniProt protein accessions
+# mouse_accessions <- regmatches(
+#   mouse_fasta$desc,
+#   gregexpr("(?<=\\|).*?(?=\\|)", mouse_fasta$desc, perl = TRUE)) %>% unlist()
+# 
+# write.csv(mouse_accessions, "../fasta_files/230124_SwissProt_Reviewed_mouse_Proteome_No_Isoforms_Oakem.FASTA")
+# 
+# mouse_df <- uniprotREST::uniprot_map(
+#   mouse_accessions,
+#   format = "tsv",
+#   fields = c("accession", "feature_count")
+# )
+# 
+# write.csv(mouse_df, "../fasta_files/2022_03_mouse_proteins_features")
+# 
+# mouse_glycoprotein_df <- mouse_df %>%
+#   mutate(Glyco.features = str_extract(Features, "(?<=Glycosylation \\()[0-9]+")) %>%
+#   mutate(Glyco = grepl("Glycosylation", Features)) # this line removes the
+# 
+# mouse_glycoprotein_df <- mouse_glycoprotein_df %>%
+#   filter(!is.na(Glyco.features))
+# 
+# write.csv(mouse_glycoprotein_df, "../results/2022_03_mouse_glycoprotein_names.csv")
+
+mouse_glycoprotein_df <- read.csv("../results/2022_03_mouse_glycoprotein_names.csv")
+
+```
+The code her is functional, however to seed up subsequent runs it is commented
+out and the data are extracted from a CSV. This code determines the
+glycoproteins present in the samples.
+
+```{r defining_glycoproteins, cache = TRUE}
+## Extract only glycoprotein accessions 
+glycoprotein_accessions <- mouse_glycoprotein_df$Entry
+
+## Verify and determine number of glycoproteins
+length(glycoprotein_accessions)
+```
+This is the number of known mouse glycoproteins obtained from UniProt
+(2023-02-7).
+
+```{r annotating_glycoproteins, cache = TRUE}
+## Add column to rowData to indicate whether a peptide maps to a glycoprotein
+rowData(hoefig_se)$Glycoprotein <- ifelse(rowData(hoefig_se)$Master.Protein.Accessions %in% glycoprotein_accessions, "yes", "no")
+
+## Verify and check how many peptides map to a master glycoprotein
+table(rowData(hoefig_se)$Glycoprotein)
+```
+The number of peptides derived from the glycoproteins (above) varies based on
+the experimental system and the extraction method. As this experiment uses the
+organic phase there are fewer glycoproteins than would be obtained when using
+the interface data.
+
+
+##Labelling RBPs
+```{r temp_requirements, cache = TRUE}
+#install.packages("remotes")
+library("remotes")
+
+## install and load uniprotREST from github
+#remotes::install_github("csdaw/uniprotREST")
+library(uniprotREST)
+
+```
+Here we use the uniprotREST package, this will be uploaded to Bioconductor in
+the following months.
+
+```{r extract_rbp_info, cache=TRUE}
+## Find GO terms for proteins within our data
+protein_go_terms <- uniprotREST::uniprot_map(
+                                ids = rowData(hoefig_se)$Master.Protein.Accessions,
+                                from = "UniProtKB_AC-ID",
+                                to = "UniProtKB",
+                                format = "tsv",
+                                path = NULL,
+                                fields = c("accession", "go_id"),
+                                method = "paged")
+
+## Find protein accessions with 'RNA-binding' - GO:0003723
+rbp_indices <- grep("GO:0003723", protein_go_terms$Gene.Ontology.IDs)
+rbp_proteins <- protein_go_terms$Entry[rbp_indices]
+
+write.csv(rbp_proteins, "../results/230208_mouse_RBPs.csv")
+
+rbp_proteins_df <- read.csv("../results/230208_mouse_RBPs.csv")
+
+rbp_proteins <- as.vector(rbp_proteins_df$x)
+
+## Get child terms from GO 'RNA-binding'
+child_terms <- AnnotationDbi::get('GO:0003723', GOMFOFFSPRING)
+
+## Find protein accessions with child GO terms
+rbp_child_indices <- grep(paste(child_terms, collapse = "|"), protein_go_terms$Gene.Ontology.IDs)
+rbp_child_proteins <- protein_go_terms$Entry[rbp_child_indices]
+
+write.csv(rbp_child_proteins, "../results/230208_rbp_child_proteins.csv")
+
+rbp_child_proteins_df <- read.csv("../results/230208_rbp_child_proteins.csv")
+
+rbp_child_proteins <- as.vector(rbp_child_proteins_df$x)
+
+```
+The proteins in our samples with RBP or child terms are identified here, then these are used to label the proteins in the qfeatures object (below).
+
+```{r defining_RBPs}
+## Add column to rowData to indicate whether peptide maps to a master protein considered high/low/none RBP
+rowData(hoefig_se)$RBP.Binding <- ifelse(rowData(hoefig_se)$Master.Protein.Accessions %in% rbp_proteins, "yes",
+                                          ifelse(rowData(hoefig_se)$Master.Protein.Accessions %in% rbp_child_proteins, "yes", "no"))
+
+## Verify  
+table(rowData(hoefig_se)$RBP.Binding)
+```
+
+
+Finally, we combine our glycoprotein and RBP annotations. We create another 
+column in the rowData.
+```{r defining_glyco_RBP_combined}
+
+rowData(hoefig_se)$Glyco.RNA.annotation <- ifelse(rowData(hoefig_se)$Glycoprotein == "yes" & rowData(hoefig_se)$RBP.Binding == "yes", "glyco_rbp",
+                                          ifelse(rowData(hoefig_se)$Glycoprotein == "yes" & rowData(hoefig_se)$RBP.Binding == "no", "glyco",
+                                          ifelse(rowData(hoefig_se)$Glycoprotein == "no" & rowData(hoefig_se)$RBP.Binding == "yes", "rbp", "other" )))
+
+
+## Verify
+table(rowData(hoefig_se)$Glyco.RNA.annotation)
+```
+
+We will save a list of protein accessions within each group in case we wish to 
+look at these in more detail later
+
+```{r exploring_glyco_RBP}
+glyco_rbp <- which(rowData(hoefig_se)$Glyco.RNA.annotation == "glyco_rbp")
+glyco_rbp <- rowData(hoefig_se[glyco_rbp, ])$Master.Protein.Accessions 
+
+rbp <- which(rowData(hoefig_se)$Glyco.RNA.annotation == "rbp")
+rbp <- rowData(hoefig_se[rbp, ])$Master.Protein.Accessions 
+
+glyco <- which(rowData(hoefig_se)$Glyco.RNA.annotation == "glyco")
+glyco <- rowData(hoefig_se[glyco, ])$Master.Protein.Accessions 
+
+other <- which(rowData(hoefig_se)$Glyco.RNA.annotation == "other")
+other <- rowData(hoefig_se[other, ])$Master.Protein.Accessions 
+
+```
+
+
+## Managing missing data at the peptide level (optional)
+Here, we complete some very relaxed, low level filtering of missing values at the
+peptide level. We already removed peptides with no quantitative values 
+(i.e. all NA values).
+
+```{r explore_missing_data, cache = TRUE}
+## Are there any NA values within the peptide data?
+anyNA(assay(hoefig_se)) 
+
+## How many NA values are there within the peptide data?
+nNA(hoefig_se)
+```
+This gives the percentage of missing data. In this print out the average missing
+data information can be obtained from the first row, in this case it is 29.2%, 
+corresponding to 28,244 missing values.
+
+
+```{r explore_missing_data_2, cache = TRUE}
+library(camprotR)
+## How are the NA values distributed across the data
+nNA(hoefig_se)$nNAcols %>% 
+          as_tibble() %>%
+          mutate(condition = ifelse(name %in% cl, "CL", "NC")) %>%
+          ggplot(aes(x = name, y = pNA, fill = condition, group = condition)) +
+          geom_bar(stat = "identity") +
+          labs(x = "Sample", y = "Missing values (%)") +
+          geom_hline(yintercept = 29.2, linetype = "dashed", color = "red") +
+          theme_csd() 
+```
+The percentages of missing data are expected to be highest in non-crosslinked
+conditions, this is observed in this data. The red dashed line shows the average
+number of missing values across all sample.
+
+
+```{r qfeatures_checking_filtering, cache = TRUE}
+## Consider minimum samples that a peptide must be quantified in to be retained
+## Find out the range of missing values 
+table(nNA(hoefig_se)$nNArows$nNA)
+```
+This data shows the number of peptides which have 0, 1, 2 etc. missing values 
+across the 6 samples. None of the peptides have 6 NA values as these were 
+filtered out when removing peptides with non quantitative values.
+
+
+```{r min_samples_filtering_options, cache = TRUE}
+## Plot graph indicating how many peptide entries would remain based on each filtering option
+no_original_peptides <- length(hoefig_se)
+
+min_samples <- c(1:6)
+peptides_lost <- c(0,
+                  length(which(nNA(hoefig_se)$nNArows$nNA >= 5)),
+                  length(which(nNA(hoefig_se)$nNArows$nNA >= 4)),
+                  length(which(nNA(hoefig_se)$nNArows$nNA >= 3)),
+                  length(which(nNA(hoefig_se)$nNArows$nNA >= 2)),
+                  length(which(nNA(hoefig_se)$nNArows$nNA >= 1)))
+
+min_samples_plot_data <- data.frame(min_samples, peptides_lost)
+min_samples_plot_data$final_peptides <- no_original_peptides - peptides_lost
+
+min_samples_plot_data %>%
+  ggplot(aes(x = min_samples, y = final_peptides)) +
+  geom_bar(stat = 'identity') +
+  xlab(label = "Minimum samples to be quantified in") +
+  ylab(label = "Peptides remaining after filter")+
+  theme_csd()
+```
+<!-- If dealing with more samples then it is probably worth extending the graph? -->
+The plot above shows the amount of peptides remaining in the dataset when the 
+acceptable number of missing values is changed. Here 4 is used as this
+corresponds to peptides which are detected in a minimum of 2 samples.
+
+```{r peptide_filtering}
+# Find out how many peptides will be lost
+too_many_na <- length(which(nNA(hoefig_se)$nNArows$nNA >= 4))
+print(too_many_na)
+
+## Remove peptides not found in min of 3 samples
+hoefig_se <- filterNA(hoefig_se, pNA = 4/6)
+message(paste0("Removed ", too_many_na, " peptides not found in at least 2 samples"))
+```
+filterNA removes rows with at least 4/6 NA value. This seemed appropriate for
+this data, however should be considered carefully for your experiment.
+
+
+## Create QFeatures object
+Now we add our `SummarizedExperiment` into a `QFeatures` object.
+```{r se_to_qf, cache=TRUE}
+## Create QFeatures object holding the filtered peptide level data
+hoefig_qf <- QFeatures(list(filtered_peptides = hoefig_se))
+colData(hoefig_qf) <- colData(hoefig_se)
+```
+
+
+## Log transform the peptide data
+Quantitative proteomics data is log2 transformed to generate a normal distribution.
+We do this within the `QFeatures` infrastructure to maintain explicit links. This
+results in the generation of a new `SummarizedExperiment` in our object.
+
+```{r create_qfeatures, cache = TRUE}
+hoefig_qf <- logTransform(hoefig_qf, 
+                        i = "filtered_peptides", 
+                        name = "log_filtered_peptides")
+
+## Verify
+hoefig_qf
+```
+```{r visualisatio_pre&post_transformation}
+#par(mfrow = c(1, 2))
+limma::plotDensities(legend="topright",assay(hoefig_qf[[1]]))
+limma::plotDensities(legend="topright",assay(hoefig_qf[[2]]))
+```
+Log transformation results in a more normal distribution for the data.
+
+## Aggregate peptide to protein
+No normalization is completed at the peptide level. Instead peptides are first
+aggregated into protein level data. Here we use the robust summary method as it
+is more robust to outliers than the colmedians method.
+
+```{r peptide_to_protein, cache = TRUE, warning=FALSE}
+## Aggregate peptides to proteins
+hoefig_qf <- aggregateFeatures(hoefig_qf,                        
+                            i = "log_filtered_peptides",
+                            fcol = "Master.Protein.Accessions", 
+                            name = "proteins",
+                            fun = MsCoreUtils::robustSummary,
+                            na.rm = TRUE)
+
+## Verify
+hoefig_qf
+```
+At this point missing values are expected- warnings are fine.
+
+
+## Managing missing data at the protein level
+Since we aggregated data that contained NA values, we could have introduced NaN values.
+Such a scenario would arise if any proteins are only supported by a single 
+peptide, and that peptide contained NA values.
+
+```{r NaN_to_NA_protein, cache = TRUE}
+## Confirm the presence of NaN
+table(is.nan(assay(hoefig_qf[[3]])))
+
+## Replace NaN with NA
+assay(hoefig_qf[[3]])[is.nan(assay(hoefig_qf[[3]]))] <- NA
+```
+<!-- I think the different method of aggregation removes the NAN issue -->
+Indeed, 2872 NaN values existed after aggregation to protein. 
+We converted these back to NA for simplicity and traceability.
+
+
+```{r explore_missing_data_protein, cache = TRUE}
+## Are there any NA values within the protein data?
+anyNA(assay(hoefig_qf[[3]])) 
+
+## How many NA values are there within the protein data?
+nNA(hoefig_qf[[3]])
+```
+We see that 17.2% of the protein level abundance data is NA values. This 
+corresponds to 2872 NA values. 
+
+```{r explore_missing_data_2_protein, cache = TRUE}
+## How are the NA values distributed across the data
+missingdataplot <- (nNA(hoefig_qf[[3]])$nNAcols %>% 
+          as_tibble() %>%
+          mutate(condition = ifelse(name %in% cl, "CL", "NC")) %>%
+          ggplot(aes(x = name, y = pNA, fill = condition, group = condition)) +
+          geom_bar(stat = "identity") +
+          labs(x = "Sample", y = "Missing values (%)") +
+          geom_hline(yintercept = 17.2, linetype = "dashed", color = "red") +
+          scale_fill_manual(values = c("purple", "orange"))+
+          theme_csd() )
+missingdataplot
+ggsave(filename = "../results/missingdataplot.png", plot = missingdataplot, dpi = 300)
+```
+
+### Peptide support for proteins
+```{r peptide_support_filtering}
+table(rowData(hoefig_qf[[3]])$.n)
+```
+
+
+```{r peptide_support_filtering_2}
+min_peptides <- 1:6
+total_proteins_original <- length(hoefig_qf[[3]])
+
+proteins_lost <- c(0,
+                  length(which(rowData(hoefig_qf[[3]])$.n == 1)),
+                  length(which(rowData(hoefig_qf[[3]])$.n <= 2)),
+                  length(which(rowData(hoefig_qf[[3]])$.n <= 3)),
+                  length(which(rowData(hoefig_qf[[3]])$.n <= 4)),
+                  length(which(rowData(hoefig_qf[[3]])$.n <= 5)))
+
+peptide_support_plot_data <- data.frame(min_peptides, proteins_lost)
+peptide_support_plot_data$final_proteins <- total_proteins_original - peptide_support_plot_data$proteins_lost
+
+peptide_support_plot_data %>%
+  ggplot(aes(x = min_peptides, y = final_proteins)) +
+  geom_bar(stat = 'identity') +
+  xlab(label = "Minimum peptides per protein") +
+  ylab(label = "Proteins remaining after filter")+
+  theme_csd()
+```
+Before dealing with NA values, we remove proteins not supported by a minimum of 
+two peptides. We use this threshold as it increases our confidence in the
+results without losing too many proteins. 
+
+
+```{r extract_all_proteins}
+## Extract protein level SummarizedExperiment
+all_proteins_se <- hoefig_qf[[3]]
+```
+Create a subset of the protein data.
+
+```{r peptide_support_filtering_3}
+## Verify how many proteins will be lost
+proteins_not_supported <- which(rowData(all_proteins_se)$.n == 1)
+
+## Remove proteins without at least two peptides in support 
+all_proteins_se <- all_proteins_se[-proteins_not_supported, ]
+message(paste0("Removed ", length(proteins_not_supported), " proteins that are not supported by at least 2 peptides"))
+
+```
+We now have our clean protein level data. Unfortunately, given the nature of the
+OOPs protocol, dealing with missing values at the protein level is not as
+straightforward. If the sample preparation was perfect, we would expect no 
+proteins to be present in the non-crosslinked sample, and very few in the cross-
+linked with RNAse. Whilst this is not the case for all proteins - it does lead to 
+many biologically meaningful missing values that we do not wish to filter out and
+ignore. Instead we want to inspect the proteins that are present in one condition
+but completely absent in others. This is important because proteins only present
+in one condition will have to be filtered out prior to statistics.
+
+
+## Discovery and exploration of infinitely enriched proteins
+Proteins are considered to be 'infinitely enriched' in a condition if they only 
+appear in this condition (within at least 3 samples) and no other condition. In
+such cases, it is not possible to calculate a ratio or perform statistics. 
+Instead, we subset these proteins out of our data and later re-add them to our
+list of enriched proteins for GO enrichment analyses.
+
+<!-- We need to decide if the term infinitely enriched is going to stay -->
+
+```{r list_of_proteins_per_condition}
+## Subset by condition 
+proteins_cl <- all_proteins_se[, 1:3]
+proteins_nc <- all_proteins_se[, 4:6]
+
+
+## Only keep proteins found in at least 1 sample (max missing values = 1)
+proteins_cl <- filterNA(proteins_cl, pNA = 1/3)
+proteins_nc <- filterNA(proteins_nc, pNA = 1/3)
+
+
+## Verify and check how many proteins found in each condition
+length(proteins_cl)
+length(proteins_nc)
+
+
+## Save accessions of these proteins
+proteins_cl_acc <- rowData(proteins_cl)$Master.Protein.Accessions
+proteins_nc_acc <- rowData(proteins_nc)$Master.Protein.Accessions
+
+```
+This code is probably currently redundant given the later processing, however if
+there were more samples it might not be.
+
+```{r list_of_unique proteins}
+## Get unique proteins from CL RNase+
+remove_from_cl <- which(rowData(proteins_cl)$Master.Protein.Accessions %in% proteins_nc_acc)
+
+unique_cl <- proteins_cl[-remove_from_cl,]
+
+## Get unique proteins from NC
+remove_from_nc <- which(rowData(proteins_cl)$Master.Protein.Accessions %in% proteins_nc_acc)
+
+unique_nc <- proteins_nc[-remove_from_nc,]
+```
+We create lists of infinitely enriched proteins, and also infinitely depleted
+proteins. Ideally there should be no proteins which are not found in the test samples.
+
+
+
+```{r protein_venn_diagram}
+## Create venn diagram of proteins present in each sample
+library("VennDiagram")
+
+venn.diagram(
+  x = list(proteins_cl_acc, proteins_nc_acc),
+  category.names = c("cl", "nc"),
+  filename = "../results/hoefig_vd.png",
+  height = 2000, 
+  width = 2000, resolution = 300,
+  main = "",
+  col=c("#440154ff", '#21908dff'),
+  fill = c(alpha("#440154ff",0.3), alpha('#21908dff',0.3)), 
+  fontfamily = "sans",
+  cat.fontfamily = "sans",
+  main.fontfamily = "sans",
+  cat.col = c("#440154ff", '#21908dff'), 
+  cat.cex = 1.2,
+  main.cex = 1.6,
+  cex = 1.7,
+  cat.fontface = 2,
+  cat.dist = c(0.08, 0.08),
+  ext.text = TRUE,
+  sub = "",
+  output = FALSE)
+
+```
+There are 339 proteins unique to the CL samples and 1 to the NC samples (from the venn diagram).
+
+
+
+We also want to check to see how many samples these 27 proteins were found in - 
+to be confident of their presence and infinite enrichment
+
+```{r visualising_infinite_proteins, cache=TRUE}
+## infinite up
+assay(unique_cl)
+
+## infinite down
+assay(unique_nc)
+```
+<!-- We need to determine what counts as infinite enrichment - and then filter based on that here -->
+
+## Calculating and normalizing protein ratios
+Since the remaining proteins are not infinitely enriched, we need to carry out
+statistical analysis to determine whether they can be considered enriched in one
+condition vs. another. Prior to statistical analysis, however, it is necessary 
+to normalize the protein-level abundance values. 
+
+I have written code for this, it is currently integrated into a differnt script
+but will be added soon. (though it's not relevant to this experiment as they
+used the interface)
+
+
+
+
+### Calculating protein ratios
+Haven't found a way to do this directly in `QFeatures` but since we already have
+our protein-level `SummarizedExperiment`, we can refer back to the `QFeatures` 
+links when exploring our final protein lists.
+
+```{r check_dimentions, cache=TRUE}
+dim(all_proteins_se)
+```
+This means we have 1950 proteins and 6 sample.
+
+```{r data_wrangling, warning = FALSE}
+## Create required data structure with appropriate columns
+Rep1 <- c("S1", "S4")
+Rep2 <- c("S2", "S5")
+Rep3 <- c("S3", "S6")
+
+
+protein_ratio_df <- assay(all_proteins_se) %>%
+                    longFormat() %>%
+                    mutate(condition = ifelse(colname %in% cl, "cl", "nc")) %>%
+                    mutate(replicate = ifelse(colname %in% Rep1, "Rep1", 
+                                        ifelse(colname %in% Rep2, "Rep2", "Rep3"))) %>%
+                   mutate(protein = rowname) %>%
+                   mutate(colname = NULL, rowname = NULL) %>%
+                   mutate(row = row_number()) %>%
+                   pivot_wider(id_cols = c(protein, replicate), names_from = condition, values_from = value) %>%
+                   unnest()
+
+
+##Re-add glycoprotein and RBP annotations
+protein_ratio_df$glyco_rbp_annotation <- ifelse(protein_ratio_df$protein %in% rbp, "rbp",
+                                         ifelse(protein_ratio_df$protein %in% glyco, "glyco",
+                                         ifelse(protein_ratio_df$protein %in% glyco_rbp, "glyco_rbp", "Other")))
+
+protein_ratio_df$glycoprotein <- ifelse(protein_ratio_df$protein %in% glycoprotein_accessions, "yes", "no")
+protein_ratio_df
+
+## Calculate protein ratios for the required comparisons
+protein_ratio_df$ratio_nc_over_cl <- protein_ratio_df$cl/protein_ratio_df$nc   
+
+
+## Verify
+head(protein_ratio_df)
+```
+
+
+#### Comparison CL/NC
+```{r Plotting_the_ratios_of_CL/NC, cache=TRUE}
+protein_ratio_df %>%
+  na.omit() %>%
+  ggplot(aes(x = log2(ratio_nc_over_cl), color = glyco_rbp_annotation, 
+             group = glyco_rbp_annotation)) +
+  geom_density() + 
+  geom_vline(xintercept = 0, colour = 'grey', linetype = 2) +
+  facet_wrap(~ replicate) +
+  theme_bw() +
+  xlab(label = "log2(CL/NC)") +
+  ggtitle(label = "Protein ratios CL/NC per replicate")
+```
+Visualise ratios of all labelled traits. 
+
+
+```{r table_of_annotation}
+table(protein_ratio_df$glyco_rbp_annotation)
+```
+Remove some of the low abundance groups e.g.glyco-RNA binding proteins. 
+<!-- irrelevant for this data -->
+
+```{r simplified_density_plots, cache=TRUE}
+protein_ratio_df %>%
+  na.omit() %>%
+  filter(!glyco_rbp_annotation %in% c("HC_Glyco_RBP", "LC_Glyco_RBP")) %>%
+  ggplot(aes(x = log2(ratio_nc_over_cl), color = glyco_rbp_annotation, 
+             group = glyco_rbp_annotation)) +
+  geom_density() + 
+  geom_vline(xintercept = 0, colour = 'grey', linetype = 2) +
+  facet_wrap(~ replicate) +
+  theme_bw() +
+  xlab(label = "log2(CL/NC)") +
+  ggtitle(label = "Protein ratios CL(no RNase)/NC per replicate")
+```
+We also have a look when just considering a more basic separation of glycoproteins
+vs. everything else. 
+
+```{r glycoprotein_plots, cache=TRUE}
+protein_ratio_df %>%
+  na.omit() %>%
+  filter(!glyco_rbp_annotation %in% c("glyco_rbp")) %>%
+  ggplot(aes(x = log2(ratio_nc_over_cl), color = glycoprotein, group = glycoprotein)) +
+  geom_density() + 
+  geom_vline(xintercept = 0, colour = 'grey', linetype = 2) +
+  facet_wrap(~ replicate) +
+  theme_csd() +
+  xlab(label = "log2(CL/NC)") +
+  ggtitle(label = "Protein ratios CL/NC per replicate")
+```
+Here we expect to see non-glycoproteins peaking at higher values than glycoproteins as they should have different behaviours in the different samples.
+
+
+
+
+
+## Glycoprotein normalisation
+Steps:
+1. extract assay data
+2. remove rows containing NA values
+3. calculate normalisation factors
+4. create a new level of summarised experiment and subtract these values from each row
+N.B. it is subtraction because the data have been log transformed
+
+### Preparing the data to determine normalisation factors
+```{r preparing_df_for_normalisation_factors}
+## Extracting the assay information and omitting rows with NA values
+for_normalisation <- assay(hoefig_qf[[3]]) %>%
+  na.omit()%>%
+  as.data.frame()
+
+## Adding glyco information to filter out non-glycoproteins (doesn't contain glyco_RBPs)
+for_normalisation$glyco <- ifelse(rownames(for_normalisation) %in% glyco, "yes", "no")
+
+for_normalisation <- for_normalisation %>% 
+  filter(for_normalisation$glyco == "yes")
+
+for_normalisation <- for_normalisation[,-7]
+
+```
+<!-- last line of this chunk removes the last column - will need to change this for different length columns -->
+
+### Calculate column medians
+```{r col_medians,cache=TRUE}
+## Convert to a matrix format
+for_normalisation <- as.matrix(for_normalisation)
+
+## Calculate column medians
+normalisation_factors <- MatrixGenerics::colMedians(for_normalisation)
+
+## Calculate the mean of col medians
+mean_norm_factors <- mean(normalisation_factors)
+
+## Divide factors by mean
+normalisation_factors <- normalisation_factors-mean_norm_factors
+```
+As this is log transformed data rather than dividing the sample by col(median)/mean(medians). We subtract (median(column)-mean(medians) from the column
+
+### Create an SE for normalisation
+Opted to create new SE as could only work out how to create a new protein level
+thing by doing another aggregation from peptide level. THis would then need to
+have the protein level filtering applied to it.
+```{r se_for_normalisation}
+## create a summarised experiment for the normalisation
+normalised_se <- hoefig_qf[[3]]
+
+## visualise the assay
+head(assay(normalised_se))
+
+```
+### Create a function for normalisation of columns
+This takes the normalisation factors and subtracts them from the correct column.
+```{r function_to_adjust_cols}
+## Create a function for the adjustment of columns by normalization factors
+normalisaing_col_data <- function(se, norm_factors){
+se = assay(normalised_se)
+# norm_factors = normalisation_factors
+
+   for (i in 1:ncol(se)){
+     # print(i)
+     # print(normalisation_factors[i])
+      assay(se)[,i] = assay(se)[,i]-norm_factors[i]
+     }
+   return(assay(se))
+
+}
+
+
+```
+
+### Apply the function
+```{r normalisation, cache=TRUE}
+head(assay(normalised_se))
+
+normalised_se_old = normalised_se
+normalised_se@assays@data$assay =  normalisaing_col_data(normalised_se, normalisation_factors)
+
+#normalized_se <- normalize_columns(normalised_se, normalisation_factors)
+head(assay(normalised_se))
+```
+
+
+## checking the effect of normalisation
+Here the effect of normalisation is visualised in the density plots. Glycoproteins should now all be better centred on zero.
+```{r norm_data_wrangling, warning = FALSE}
+## Create required data structure with appropriate columns
+Rep1 <- c("S1", "S4")
+Rep2 <- c("S2", "S5")
+Rep3 <- c("S3", "S6")
+
+
+norm_protein_ratio_df <- assay(normalised_se) %>%
+                    longFormat() %>%
+                    mutate(condition = ifelse(colname %in% cl, "cl", "nc")) %>%
+                    mutate(replicate = ifelse(colname %in% Rep1, "Rep1", 
+                                        ifelse(colname %in% Rep2, "Rep2", "Rep3"))) %>%
+                   mutate(protein = rowname) %>%
+                   mutate(colname = NULL, rowname = NULL) %>%
+                   mutate(row = row_number()) %>%
+                   pivot_wider(id_cols = c(protein, replicate), names_from = condition, values_from = value) %>%
+                   unnest()
+
+
+##Re-add glycoprotein and RBP annotations
+norm_protein_ratio_df$glyco_rbp_annotation <- ifelse(norm_protein_ratio_df$protein %in% rbp, "rbp",
+                                         ifelse(norm_protein_ratio_df$protein %in% glyco, "glyco",
+                                         ifelse(norm_protein_ratio_df$protein %in% glyco_rbp, "glyco_rbp", "Other")))
+
+norm_protein_ratio_df$glycoprotein <- ifelse(norm_protein_ratio_df$protein %in% glycoprotein_accessions, "yes", "no")
+norm_protein_ratio_df
+
+## Calculate protein ratios for the required comparisons
+norm_protein_ratio_df$ratio_nc_over_cl <- norm_protein_ratio_df$cl/norm_protein_ratio_df$nc   
+
+
+## Verify
+head(norm_protein_ratio_df)
+```
+```{r norm_glycoprotein_plots, cache=TRUE}
+distributionplotswf <- (norm_protein_ratio_df %>%
+  na.omit() %>%
+  filter(!glyco_rbp_annotation %in% c("glyco_rbp")) %>%
+  ggplot(aes(x = log2(ratio_nc_over_cl), color = glycoprotein, group = glycoprotein)) +
+  geom_density() + 
+  geom_vline(xintercept = 0, colour = 'grey', linetype = 2) +
+  facet_wrap(~ replicate) +
+  theme_csd() +
+  xlab(label = "log2(CL/NC)") +
+  xlim(-0.3, 0.6))
+distributionplotswf
+
+ggsave(filename = "../results/distributionplotswf.png", plot = distributionplotswf, dpi = 300)
+```
+
+
+## Filtering NA values
+Filtering out NA values to the permissive level for statistical analysis. In
+this case for statistics we require at least 3 values each condition. This will
+need to be changed if there are more than 3 replicates in an experiment.
+
+```{r filter_nas, cache=TRUE}
+## Create a new SE containing proteins with NA values filtered out to the desired level
+filtered_proteins_se <- filterNA(normalised_se, pNA = 0/6)
+
+head(assay(filtered_proteins_se))
+```
+This removes any rows that have NA values. The threshold amount of NA values has
+to be carefully considered for the statistical analysis dependent on the number
+of samples. In this case as there are 3 samples any proteins in samples
+containing an NA are not considered.
+
+
+
+## Statistical Testing
+### Correlation plots
+Testing the reproducibility between samples.
+
+```{r correlation_plots1, cache=TRUE}
+filtered_proteins_df <- as.data.frame(assay(filtered_proteins_se))
+
+
+
+correlation_matrix <- cor(filtered_proteins_df, method = "pearson", use = "pairwise.complete.obs")
+print(correlation_matrix)
+```
+
+
+```{r add_means_for_scatterplot, cache=TRUE}
+## calculate the means of the conditions
+filtered_proteins_df2 <- filtered_proteins_df
+filtered_proteins_df2$mean_cl <- rowMeans(filtered_proteins_df2[,1:3])
+filtered_proteins_df2$mean_nc <- rowMeans(filtered_proteins_df2[,4:6])
+
+
+## convert the row names into a colum
+library(tibble)
+filtered_proteins_df2 <- rownames_to_column(filtered_proteins_df2)
+
+## Add in the glyco and RBP information for plotting
+filtered_proteins_df2$type <- ifelse(filtered_proteins_df2$rowname %in% glyco, "glyco", ifelse(filtered_proteins_df2$rowname %in% rbp, "rbp", "other"))
+
+head(filtered_proteins_df2)
+```
+
+
+
+```{r correlation_plots2, cache=TRUE}
+# BiocManager::install(c("corrplot")) required for this section
+
+## Create colour palette for continuum
+col <- colorRampPalette(c("#BB4444", "#EE9988", "#FFFFFF", "#77AADD", "#4477AA"))
+
+library("corrplot")
+
+#filtered_proteins_df <- filtered_proteins_df[,-filtered_proteins_df$rowname]
+## Plot all pairwise correlations
+corrplot(cor(filtered_proteins_df, method = "pearson", use = "pairwise.complete.obs"),
+         method = 'color', col = col(200), type = "upper", addCoef.col = "white",
+         diag = FALSE, tl.col = "black", tl.srt = 45, outline = TRUE)
+```
+### Scatter plot
+```{r scatter_plot, cache=TRUE}
+## Plot a scatterplot of the data
+scatterplot <- (ggplot(data = filtered_proteins_df2, aes(x = mean_nc, y = mean_cl, color = type)) +
+      geom_point(size = 0.9) +
+      geom_abline(intercept = 0, slope = 1) +
+      theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+        plot.background = element_rect(fill="white"), 
+        panel.background = element_rect(fill="white"),
+        axis.title.x = element_text(size = 15, face = "bold", vjust = -2), 
+        axis.title.y = element_text(size = 15, face = "bold", vjust = 3),
+        axis.text.x = element_text(size = 12, vjust = -1), 
+        axis.text.y = element_text(size = 12),
+        axis.line = element_line(linewidth = 0.5, colour = "black"),
+        plot.margin = margin(10, 10, 10, 10)) +
+  xlab("Mean Non-crosslinked Intensity") + ylab("Mean Crosslinked Intensity") + 
+  coord_fixed(ratio = 1) +
+  xlim(18,28)+
+  ylim(18,28)+
+  scale_color_manual(values=c("#56B4E9","35ccd0ff", "#f99b94ff"))+
+  theme_csd())
+scatterplot
+ggsave(filename = "../results/scatterplot.png", plot = scatterplot, dpi = 300)
+```
+Visualisation of how the different data are spread. It is expected that RBPs and non-glycoproteins should be enriched.
+
+### PCA
+This can only be done on data without missing values and is performed to check the behaviour of the different samples.
+```{r setting_up_pca, cache=TRUE}
+protein_pca <- all_proteins_se %>%
+                filterNA() %>%                                               
+                assay() %>%                                                  
+                t() %>%                                                      
+                prcomp(scale = TRUE, center = TRUE) 
+library("factoextra")
+get_eig(protein_pca)
+```
+
+
+```{r scree_plot, cache=TRUE}
+fviz_eig(protein_pca)
+```
+
+```{r pca_plot, cache=TRUE}
+pca_df <- as.data.frame(protein_pca$x)
+
+pca_df$condition <- hoefig_qf[[1]]$condition
+
+wfpca <- (ggplot(data = pca_df, (aes(x = PC1, y = PC2, colour = condition))) +
+      geom_point(size = 4) +
+      scale_color_brewer(palette = "Set2") + labs(colour = "condition") +
+      theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        axis.title.x = element_text(size = 15, face = "bold", vjust = -2), 
+        axis.title.y = element_text(size = 15, face = "bold", vjust = 3),
+        axis.text.x = element_text(size = 12, vjust = -1), 
+        axis.text.y = element_text(size = 12),
+        plot.margin = margin(10, 10, 10, 10)) +
+  geom_hline(yintercept = 0, linetype = "dashed") + 
+  geom_vline(xintercept = 0, linetype = "dashed") +
+  scale_color_manual(values = c("purple","orange"))+
+  guides(colour = guide_legend(override.aes = list(size = 3))) +
+  xlab(label = "PC1 (91.6 %)") + ylab(label = "PC2 (5.4 %)") +
+  xlim(-75, 75) + ylim(-75, 75) +
+  coord_fixed(ratio = 1)+
+  theme_csd())
+wfpca
+ggsave(filename = "../results/wfpca.png", plot = wfpca, dpi = 300)
+```
+For the PCA plot the % on each axis must be changed based on the contribution of each dimention in the scree plot.
+
+
+### Differential expression analysis
+```{r reformat_for_analysis, cache=TRUE}
+## Extract protein level data and associated colData
+protein_cp_data <- all_proteins_se
+colData(protein_cp_data) <- colData(all_proteins_se)
+
+## Create factor of interest
+protein_cp_data$condition <- factor(protein_cp_data$condition) 
+
+## Check which level of the factor is the reference level and correct (if necessary)
+protein_cp_data$condition
+```
+
+```{r reformat_for_analysis2, cache=TRUE}
+protein_cp_data$condition <- relevel(protein_cp_data$condition, ref = "NC")
+
+## Verify
+protein_cp_data$condition
+```
+
+
+```{r analysis_model, cache=TRUE}
+## Design a matrix containing all of the factors we wish to model the effects of
+design <- model.matrix(~ protein_cp_data$condition)
+
+## Verify
+print(design)
+```
+
+
+```{r statistical_test, cache=TRUE}
+library("limma")
+## Create a linear model using this design
+fit <- lmFit(assay(protein_cp_data), design)
+
+## Update the model based on Limma eBayes algorithm
+fit <- eBayes(fit, trend = TRUE)
+
+## Save results of the test
+limma_results <- topTable(fit, coef = "protein_cp_data$conditionCL", number = Inf) %>%
+                  rownames_to_column("Protein") %>%
+                  as_tibble() %>%
+                  mutate(TP = grepl("ups", Protein))
+```
+Either 'voom' or 'trend=TRUE' is used in fitting the model. In this case we use trend as voom is more appropriate for RNA seqencing experiments.
+
+```{r pval_histogram, cache=TRUE}
+## Plot histogram of p-values
+limmaplot <- (limma_results %>%
+        ggplot(aes(x = P.Value)) +
+        geom_histogram(binwidth = 0.025) +
+        labs(x = "p-value", y = "Frequency") +
+        theme_csd(aspect_square = FALSE) )
+limmaplot
+ggsave(filename = "../results/limmaplot.png", plot = limmaplot, dpi = 300)
+```
+
+
+```{r check_limma_results}
+head(limma_results)
+```
+
+
+```{r adding_fold_change_direction, cache=TRUE}
+## Add direction of log fold change relative to mock
+limma_results$direction <- as.factor(ifelse(limma_results$logFC > 0, "up", "down"))
+
+## Add significance thresholds
+limma_results$significance <- as.factor(ifelse(limma_results$adj.P.Val < 0.01, "sig", "not.sig"))
+
+## Verify
+str(limma_results)
+```
+
+```{r stats_summary, cache=TRUE}
+## Get a summary of statistically significant results
+summary(decideTests(fit, adjust.method = "BH", p.value = 0.01))
+```
+
+```{r no_sig_proteins}
+## Subset proteins that show significantly different abundance 
+significant_proteins <- subset(limma_results, adj.P.Val <= 0.01)
+length(significant_proteins$Protein)
+```
+
+```{r volcano_plot, cache=TRUE}
+## Generate a volcano plot
+volcanowf <- (limma_results %>%
+   ggplot(aes(x = logFC, y = -log10(P.Value))) +
+   geom_point(aes(colour = significance:direction), size = 0.5) +
+   scale_color_manual(values = c("black","black", "red", "deepskyblue"), name = "",
+                      labels = c("Downregulated insignificant", "Upregulated insignificant", "Upregulated significant",
+                                 "Downregulated significant")) +
+   theme(axis.title.x = element_text(size = 15, face = "bold", vjust = -2), 
+        axis.title.y = element_text(size = 15, face = "bold", vjust = 3),
+        axis.text.x = element_text(size = 12, vjust = -1), 
+        axis.text.y = element_text(size = 12, hjust = -1),
+        plot.background = element_rect(fill = "white"), 
+        panel.background = element_rect(fill = "white"),
+        legend.position = c(-2.5, 5), 
+        axis.line = element_line(linewidth = 0.5, colour = "black"),
+        plot.margin = margin(10, 10, 10, 10))+
+  ylab("-log(p-value)")+
+  xlab("log(FC)")+
+  theme_csd())
+volcanowf
+ggsave(filename = "../results/volcanowf.png", plot = volcanowf, dpi = 300)
+```
+The data are visualised using a volcano plot.
+
+```{r fold_change_vs_adundance, cache=TRUE}
+mawf <- (limma_results %>%
+   ggplot(aes(x = AveExpr, y = logFC)) +
+   geom_point(aes(colour = significance:direction), size = 0.5) +
+   scale_color_manual(values = c("black","black", "red", "deepskyblue"), name = "", 
+                      labels = c("Downregulated insignificant", "Upregulated insignificant", "Upregulated significant",
+                                 "Downregulated significant")) +
+   theme(axis.title.x = element_text(size = 15, face = "bold", vjust = -2), 
+        axis.title.y = element_text(size = 15, face = "bold", vjust = 3),
+        axis.text.x = element_text(size = 12, vjust = -1), 
+        axis.text.y = element_text(size = 12, hjust = -1),
+        plot.background = element_rect(fill = "white"), 
+        panel.background = element_rect(fill = "white"),
+        axis.line = element_line(linewidth = 0.5, colour = "black"),
+        legend.position = c(0.175, 0.9),
+        plot.margin = margin(10, 10, 10, 10)) +
+  xlab("log(abundance)") +
+  ylab("log(FC)") +
+  theme_csd())
+mawf
+ggsave(filename = "../results/mawf.png", plot = mawf, dpi = 300)
+```
+Data visualisation using an MA plot.
+
+### GO analysis
+This shows the enrichment of certain terms and is one of the things giving an
+indication on the success of OOPS experiments.
+```{r gene_names, cache=TRUE}
+## Upload fasta file containing the mouse proteome
+mouse_fasta <- Biostrings::fasta.index(directory_hp, seqtype = "AA")
+
+
+## Extract protein accession numbers
+mouse_accessions <- regmatches(mouse_fasta$desc,
+  gregexpr("(?<=\\|).*?(?=\\|)", mouse_fasta$desc, perl = TRUE)) %>% 
+  unlist()
+
+## Extract gene names
+gene_name <- str_extract(mouse_fasta$desc, "(?<=GN=)[^ ]*(?= |$)")
+
+## Extract protein description
+gene_desc <- gsub(".*MOUSE (.+) OS.*", "\\1", mouse_fasta$desc)
+#check this bit works
+
+## Create dataframe with accession number, gene name and protein description 
+mouse_data <- cbind(mouse_accessions, gene_name)
+mouse_data <- cbind(mouse_data, gene_desc)
+mouse_data <- as.data.frame(mouse_data)
+
+## Set column names as protein accession
+colnames(mouse_data)[1] <- "Protein" 
+
+## Merge mouse proteome dataframe with limma results 
+limma_results_with_genes <- join(limma_results, mouse_data)
+rownames(limma_results_with_genes) <- rownames(limma_results)
+
+## Check for proteins without a gene name
+table(is.na(limma_results_with_genes$gene_name) == TRUE)
+```
+
+```{r removing_nas}
+table(is.na(limma_results_with_genes$gene_name) == TRUE)
+
+## Store indices of duplicated gene names 
+na_genes <- which(is.na(limma_results_with_genes$gene_name) == TRUE)
+```
+
+
+```{r remove_nas, cache=TRUE}
+## Remove these rows from our data
+limma_results_with_genes <- limma_results_with_genes[-na_genes, ]
+
+message(paste0("Removed ", length(na_genes), " NAs for gene name"))
+```
+<!-- If there are no NAs this will clear the data -->
+
+```{r remove_duplicates, cache=TRUE}
+table(duplicated(limma_results_with_genes$gene_name) == TRUE)
+
+## Store indices of duplicated gene names 
+duplicated_genes <- which(duplicated(limma_results_with_genes$gene_name) == TRUE)
+
+## Remove these rows from our data
+limma_results_with_genes <- limma_results_with_genes[-duplicated_genes, ]
+message(paste0("Removed ", length(duplicated_genes), " duplicated gene name"))
+```
+<!-- If there are no NAs this will clear the data -->
+
+
+```{r check_results, cache=TRUE}
+str(li <- a_results_with_genes)
+```
+
+
+```{r direction_of_change, cache=TRUE}
+## Subset all, upregulated and downregulated significant proteins
+significant <- subset(limma_results_with_genes, significance == "sig")
+sig_upregulated <- subset(significant, direction == "up")
+sig_downregulated <- subset(significant, direction == "down")
+```
+
+<!-- Currently I haven't added back in the 'infinite' enriched proteins - this needs to be done but I'm not sure at what point we want to. -->
+
+```{r create_gene_lists, cache=TRUE}
+## Prepare gene lists
+genes <- limma_results_with_genes$gene_name
+significant_genes <- significant$gene_name
+upregulated_genes <- sig_upregulated$gene_name
+downregulated_genes <- sig_downregulated$gene_name
+
+## Prepare protein lists
+proteins <- limma_results_with_genes$Protein
+upregulated_proteins <- sig_upregulated$Protein
+downregulated_proteins <- sig_downregulated$Protein
+
+## Load AnnotateDbi database containing all gene annotation for the mouse genome
+library(org.Mm.eg.db)
+mm <- org.Mm.eg.db 
+
+
+#needs to be Hs for mouse searches
+#BiocManager::install("org.Mm.eg.db")
+#library(org.Mm.eg.db)
+
+## Select Uniprot and Entrez IDs for all genes in our experiment
+genes_eid <- AnnotationDbi::select(mm, 
+                                  keys = as.character(proteins),
+                                  columns = c("ENTREZID", "UNIPROT"),
+                                  keytype = "UNIPROT")
+```
+
+
+```{r upregulated_protein_ids, cache=TRUE}
+## Select Uniprot and Entrez IDs for upregulated protein genes in our experiment
+
+upregulated_genes_eid <- AnnotationDbi::select(mm, 
+                                               keys = as.character(upregulated_proteins),
+                                               columns = c("ENTREZID", "UNIPROT"),
+                                               keytype = "UNIPROT")
+
+```
+
+
+```{r downregulated_protein_ids, cache=TRUE}
+## Select Uniprot and Entrez IDs for downregulated protein genes in our experiment
+
+downregulated_genes_eid <- AnnotationDbi::select(mm, 
+                                                keys = downregulated_proteins,
+                                                columns = c("ENTREZID", "UNIPROT"),
+                                                keytype = "UNIPROT")
+```
+
+
+### Need to add back our infinite proteins
+```{r adding_infinite_prots, cache=TRUE}
+# this could be done before or after the joining to the QF object
+```
+
+### Gene Ontology
+```{r preping_for_go, cache=TRUE}
+library(QFeatures)
+library(uniprotREST)
+library(goseq)
+suppressPackageStartupMessages(library(dplyr))
+if (!requireNamespace("org.Mm.eg.db", quietly = TRUE)) {
+  BiocManager::install("org.Mm.eg.db")
+}
+```
+
+```{r extract_protein_names, cache=TRUE}
+# hl is data from mouse. Let's see if goseq can deal with mouse data
+#supportedOrganisms()
+
+# we'll use mm9 for now
+#supportedOrganisms()[supportedOrganisms()$Genome=="hg19",]
+
+# goseq can recognise Entrez gene IDs, Ensembl gene IDs, and Gene Symbols
+# we can map uniprot IDs to Ensembl gene IDs with uniprotREST
+acc_to_map <- rownames(hoefig_qf[[3]])
+```
+
+
+```{r ensembl_gene_ids, cache=TRUE}
+acc_mapped <- uniprot_map(acc_to_map, to = "Ensembl")
+```
+```{r add_gene_ids}
+# add Ensembl IDs to QFeatures object
+# (don't know if this is the proper way to do this...)
+rowData(hoefig_qf[[3]]) <- rowData(hoefig_qf[[3]]) %>% 
+  data.frame() %>% 
+  tibble::rownames_to_column("rowname") %>% 
+  left_join(acc_mapped, by = c("Master.Protein.Accessions" = "From")) %>% 
+  rename("ensembl" = "To") %>% 
+  distinct(rowname, .keep_all = TRUE) %>%  # remove unintended duplicates indiscriminantly for now
+  tibble::column_to_rownames("rowname")
+```
+```{r remove_duplicates_and_nas}
+# Just for this example, filter out rows without Ensembl ID
+# filter out duplicates
+hoefig_qf <- filterFeatures(hoefig_qf, ~ !is.na(ensembl) & !duplicated(ensembl), keep=TRUE)
+# this line of code is clearning all the other data in the other layers of the QF object
+anyDuplicated(rowData(hoefig_qf[[3]])$ensembl)
+```
+
+```{r label_significantly_upregulated_genes, cache=TRUE}
+rowData(hoefig_qf[[3]])$up_significant <- 
+  ifelse(rowData(hoefig_qf[[3]])$Master.Protein.Accessions %in% upregulated_proteins, 1, 0)
+
+head(rowData(hoefig_qf[[3]]))
+
+# prepare vector of DE genes for goseq
+genes <- rowData(hoefig_qf[[3]])$up_significant
+names(genes) <- rowData(hoefig_qf[[3]])$ensembl
+head(genes)  
+table(genes)
+```
+
+
+```{r peptide_expression_relationship}
+## 6.5 GO analysis
+
+# by default goseq uses gene length as the bias factor, but we want to use
+# number of peptides per protein
+n_pep <- rowData(hoefig_qf[[3]])$.n
+
+
+
+# no obvious relationship between n_peptides and probabity of being differentially
+# expressed... which makes sense as we have chosen our DE genes at random
+# (see the GOseq vignette for an example of a graph showing a biased relationship)
+test <- genes
+names(test) <- sub('\\..*', '', names(genes))
+test2 <- test[!duplicated(names(test)) & !is.na(names(test))]
+n_pep2 <- n_pep[!duplicated(names(test)) & !is.na(names(test))]
+
+#debugonce(nullp)
+pwf <- nullp(
+  DEgenes = test2,
+  genome = "mm9",
+  id = "ensGene",
+  bias.data = n_pep2,
+  plot.fit = FALSE
+)
+
+# Use default method for GO enrichment
+# (this will take a moment)
+result <- goseq(pwf, 'mm9', 'ensGene')
+```
+If using other organisms it is important to change it to the correct one (mm9 is the mouse genome)
+
+
+## Plotting GO results
+### Subset MF GO terms
+```{r plotting_go, cache=TRUE}
+# MF GO terms
+library(dplyr)
+mf_go <- result
+mf_go <- filter(mf_go, ontology == "MF")
+mf_go2 <- mf_go %>%
+  arrange(over_represented_pvalue) %>%
+  slice(c(head(row_number(),10)))
+
+mf_go2$log2_over_represented <- log2(mf_go2$over_represented_pvalue)
+mf_go2$log2_over_represented <- mf_go2$log2_over_represented*(-1)
+
+
+
+ggplot(mf_go2, aes(x = reorder(term, +log2_over_represented), y = log2_over_represented)) +
+  geom_bar(stat = "identity", fill = "steelblue")+
+  coord_flip()+
+  labs(x = "Gene Ontology Term", y = "log(p-value)")+
+  theme_csd()
+```
+
